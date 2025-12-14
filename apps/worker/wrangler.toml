@@ -1,0 +1,25 @@
+name = "chogwatch-worker"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+# D1 Database binding
+[[d1_databases]]
+binding = "DB"
+database_name = "chogwatch"
+database_id = "c0eb29ca-97e2-4173-8e2d-2861494e57ab"
+
+# Cron trigger - runs hourly, screening.ts checks if interval has passed
+[triggers]
+crons = ["0 * * * *"]
+
+[vars]
+MONAD_RPC_URL = "https://rpc.monad.xyz"
+MONAD_CHAIN_ID = "143"
+CHOG_CONTRACT = "0x350035555E10d9AfAF1566AaebfCeD5BA6C27777"
+ELIGIBILITY_THRESHOLD = "1000000"
+
+# Secrets (set via wrangler secret put):
+# - TELEGRAM_BOT_TOKEN
+# - TELEGRAM_CHAT_ID
+# - ADMIN_TOKEN
