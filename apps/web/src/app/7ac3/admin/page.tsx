@@ -42,6 +42,8 @@ import {
     Unlock,
     Save,
     X,
+    AlertTriangle,
+    CheckCircle,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -157,6 +159,16 @@ export default function AdminPage() {
     const [admins, setAdmins] = React.useState<Admin[]>([]);
     const [newAdminHandle, setNewAdminHandle] = React.useState('');
     const [adminLoading, setAdminLoading] = React.useState(false);
+
+    // Group migration state
+    const [migrationExpanded, setMigrationExpanded] = React.useState(false);
+    const [newChatId, setNewChatId] = React.useState('');
+    const [validatedGroup, setValidatedGroup] = React.useState<{ valid: boolean; chat_id?: number; title?: string; type?: string; error?: string } | null>(null);
+    const [validationLoading, setValidationLoading] = React.useState(false);
+    const [migrationStep, setMigrationStep] = React.useState<'input' | 'validated' | 'otp' | 'done'>('input');
+    const [migrationSessionId, setMigrationSessionId] = React.useState<string | null>(null);
+    const [migrationOtp, setMigrationOtp] = React.useState('');
+    const [migrationLoading, setMigrationLoading] = React.useState(false);
 
     // Load session from localStorage on mount
     React.useEffect(() => {
@@ -614,6 +626,96 @@ _Threshold: {{threshold}} CHOG_`;
         input.click();
     };
 
+    // Group Migration Handlers
+    const handleValidateChatId = async () => {
+        if (!newChatId.trim()) return;
+        setValidationLoading(true);
+        setValidatedGroup(null);
+
+        try {
+            const result = await authFetch('/api/admin/group/validate', {
+                method: 'POST',
+                body: JSON.stringify({ chat_id: newChatId }),
+            });
+            setValidatedGroup(result);
+            if (result.valid) {
+                setMigrationStep('validated');
+                toast.success(`Found group: ${result.title}`);
+            } else {
+                toast.error(result.error || 'Unable to access this chat');
+            }
+        } catch (err: any) {
+            toast.error(err.message || 'Validation failed');
+            setValidatedGroup({ valid: false, error: err.message });
+        } finally {
+            setValidationLoading(false);
+        }
+    };
+
+    const handleRequestMigrationOtp = async () => {
+        setMigrationLoading(true);
+        try {
+            const result = await authFetch('/api/admin/group/request-migration-otp', {
+                method: 'POST',
+            });
+            if (result.session_id) {
+                setMigrationSessionId(result.session_id);
+                setMigrationStep('otp');
+                toast.success('OTP sent to your Telegram');
+            } else {
+                toast.error('Failed to request OTP');
+            }
+        } catch (err: any) {
+            toast.error(err.message || 'Failed to request OTP');
+        } finally {
+            setMigrationLoading(false);
+        }
+    };
+
+    const handleConfirmMigration = async () => {
+        if (!migrationSessionId || !migrationOtp || migrationOtp.length !== 6) return;
+        setMigrationLoading(true);
+
+        try {
+            const result = await authFetch('/api/admin/group/migrate', {
+                method: 'POST',
+                body: JSON.stringify({
+                    new_chat_id: newChatId,
+                    otp: migrationOtp,
+                    session_id: migrationSessionId,
+                }),
+            });
+
+            if (result.success) {
+                setMigrationStep('done');
+                toast.success(`Migrated to: ${result.title}`);
+                // Refresh group info
+                loadGroupInfo();
+                // Reset migration form after a delay
+                setTimeout(() => {
+                    setMigrationExpanded(false);
+                    setMigrationStep('input');
+                    setNewChatId('');
+                    setValidatedGroup(null);
+                    setMigrationOtp('');
+                    setMigrationSessionId(null);
+                }, 3000);
+            }
+        } catch (err: any) {
+            toast.error(err.message || 'Migration failed');
+        } finally {
+            setMigrationLoading(false);
+        }
+    };
+
+    const resetMigration = () => {
+        setMigrationStep('input');
+        setNewChatId('');
+        setValidatedGroup(null);
+        setMigrationOtp('');
+        setMigrationSessionId(null);
+    };
+
     const formatAddress = (address: string) => `${address.slice(0, 6)}...${address.slice(-4)}`;
 
     // For table rows: #,##0 format (whole numbers with thousand separators)
@@ -923,6 +1025,197 @@ _Threshold: {{threshold}} CHOG_`;
                         </CardContent>
                     </Card>
                 </div>
+
+                {/* Advanced Settings - Group Migration */}
+                <Card>
+                    <CardHeader className="cursor-pointer" onClick={() => setMigrationExpanded(!migrationExpanded)}>
+                        <CardTitle className="flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                                <AlertTriangle className="h-5 w-5 text-yellow-500" />
+                                Advanced Settings
+                            </div>
+                            {migrationExpanded ? (
+                                <ChevronUp className="h-5 w-5 text-muted-foreground" />
+                            ) : (
+                                <ChevronDown className="h-5 w-5 text-muted-foreground" />
+                            )}
+                        </CardTitle>
+                        <CardDescription>
+                            Group migration and other advanced configuration options
+                        </CardDescription>
+                    </CardHeader>
+                    {migrationExpanded && (
+                        <CardContent className="space-y-6">
+                            {/* Warning Banner */}
+                            <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-4">
+                                <div className="flex gap-3">
+                                    <AlertTriangle className="h-5 w-5 text-yellow-500 flex-shrink-0 mt-0.5" />
+                                    <div className="text-sm">
+                                        <p className="font-medium text-yellow-600 dark:text-yellow-400">
+                                            Changing the linked group will redirect all bot notifications
+                                        </p>
+                                        <p className="text-muted-foreground mt-1">
+                                            Daily eligibility updates, welcome messages, and status checks will be sent to the new group.
+                                            OTP verification is required to confirm this change.
+                                        </p>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Migration Walkthrough */}
+                            <div className="space-y-3">
+                                <h4 className="font-medium">📋 Migration Checklist</h4>
+                                <ol className="list-decimal list-inside space-y-2 text-sm text-muted-foreground">
+                                    <li>Create the new Telegram group (or use an existing one)</li>
+                                    <li>Add your bot to the new group</li>
+                                    <li>
+                                        Make the bot an <strong className="text-foreground">admin</strong> with these permissions:
+                                        <ul className="list-disc list-inside ml-4 mt-1">
+                                            <li>Send messages</li>
+                                            <li>Manage members (for kick/approve features)</li>
+                                        </ul>
+                                    </li>
+                                    <li>
+                                        Get the chat ID: Send any message in the group, then visit{' '}
+                                        <code className="bg-muted px-1 rounded text-xs">
+                                            https://api.telegram.org/bot&lt;TOKEN&gt;/getUpdates
+                                        </code>
+                                    </li>
+                                    <li>Enter the new chat ID below and click &quot;Validate&quot;</li>
+                                    <li>Confirm with OTP to complete migration</li>
+                                </ol>
+                            </div>
+
+                            {/* Migration Form */}
+                            <div className="border rounded-lg p-4 space-y-4">
+                                <h4 className="font-medium">Migrate to New Group</h4>
+
+                                {migrationStep === 'done' ? (
+                                    <div className="flex items-center gap-2 text-green-600">
+                                        <CheckCircle className="h-5 w-5" />
+                                        <span>Migration complete! Group updated successfully.</span>
+                                    </div>
+                                ) : (
+                                    <>
+                                        {/* Step 1: Chat ID Input */}
+                                        <div className="space-y-2">
+                                            <label className="text-sm text-muted-foreground">New Chat ID</label>
+                                            <div className="flex gap-2">
+                                                <Input
+                                                    placeholder="-1001234567890"
+                                                    value={newChatId}
+                                                    onChange={(e) => {
+                                                        setNewChatId(e.target.value);
+                                                        setValidatedGroup(null);
+                                                        setMigrationStep('input');
+                                                    }}
+                                                    disabled={migrationStep === 'otp'}
+                                                />
+                                                <Button
+                                                    onClick={handleValidateChatId}
+                                                    disabled={!newChatId.trim() || validationLoading || migrationStep === 'otp'}
+                                                    variant="secondary"
+                                                >
+                                                    {validationLoading ? (
+                                                        <Loader2 className="h-4 w-4 animate-spin" />
+                                                    ) : (
+                                                        'Validate'
+                                                    )}
+                                                </Button>
+                                            </div>
+                                            <p className="text-xs text-muted-foreground">
+                                                The chat ID is a negative number for groups (e.g., -1001234567890)
+                                            </p>
+                                        </div>
+
+                                        {/* Validation Result */}
+                                        {validatedGroup && (
+                                            <div className={`p-3 rounded-lg ${validatedGroup.valid ? 'bg-green-500/10 border border-green-500/30' : 'bg-red-500/10 border border-red-500/30'}`}>
+                                                {validatedGroup.valid ? (
+                                                    <div className="flex items-center gap-2 text-green-600 dark:text-green-400">
+                                                        <CheckCircle className="h-4 w-4" />
+                                                        <span>
+                                                            Found: <strong>{validatedGroup.title}</strong> ({validatedGroup.type})
+                                                        </span>
+                                                    </div>
+                                                ) : (
+                                                    <div className="flex items-center gap-2 text-red-600 dark:text-red-400">
+                                                        <X className="h-4 w-4" />
+                                                        <span>{validatedGroup.error}</span>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
+
+                                        {/* Step 2: Request OTP */}
+                                        {migrationStep === 'validated' && (
+                                            <Button
+                                                onClick={handleRequestMigrationOtp}
+                                                disabled={migrationLoading}
+                                                className="w-full"
+                                            >
+                                                {migrationLoading ? (
+                                                    <>
+                                                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                                                        Sending OTP...
+                                                    </>
+                                                ) : (
+                                                    'Request OTP to Confirm Migration'
+                                                )}
+                                            </Button>
+                                        )}
+
+                                        {/* Step 3: Enter OTP */}
+                                        {migrationStep === 'otp' && (
+                                            <div className="space-y-3">
+                                                <div className="space-y-2">
+                                                    <label className="text-sm text-muted-foreground">
+                                                        Enter the 6-digit OTP sent to your Telegram
+                                                    </label>
+                                                    <Input
+                                                        type="text"
+                                                        inputMode="numeric"
+                                                        pattern="[0-9]*"
+                                                        maxLength={6}
+                                                        placeholder="000000"
+                                                        className="text-center text-2xl tracking-widest"
+                                                        value={migrationOtp}
+                                                        onChange={(e) => setMigrationOtp(e.target.value.replace(/\D/g, ''))}
+                                                        disabled={migrationLoading}
+                                                    />
+                                                </div>
+                                                <div className="flex gap-2">
+                                                    <Button
+                                                        variant="outline"
+                                                        onClick={resetMigration}
+                                                        disabled={migrationLoading}
+                                                        className="flex-1"
+                                                    >
+                                                        Cancel
+                                                    </Button>
+                                                    <Button
+                                                        onClick={handleConfirmMigration}
+                                                        disabled={migrationOtp.length !== 6 || migrationLoading}
+                                                        className="flex-1"
+                                                    >
+                                                        {migrationLoading ? (
+                                                            <>
+                                                                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                                                                Migrating...
+                                                            </>
+                                                        ) : (
+                                                            'Confirm Migration'
+                                                        )}
+                                                    </Button>
+                                                </div>
+                                            </div>
+                                        )}
+                                    </>
+                                )}
+                            </div>
+                        </CardContent>
+                    )}
+                </Card>
 
                 {/* Settings */}
                 <Card>

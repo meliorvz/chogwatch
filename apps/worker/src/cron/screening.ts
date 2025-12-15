@@ -11,6 +11,7 @@ import {
 import { getTotalChogExposure, formatChogBalance, isEligible } from '../lib/chog';
 import { sendTelegramMessage, formatEligibilityMessage } from '../lib/telegram';
 import { generateId } from '../lib/crypto';
+import { getGroupChatId } from '../routes/admin';
 
 export interface ScreeningResult {
     runId: string;
@@ -189,7 +190,8 @@ export async function runScreening(env: Env, force: boolean = false): Promise<Sc
         });
 
         let messageSent = false;
-        if (env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID) {
+        const groupChatId = await getGroupChatId(env.DB, env.TELEGRAM_CHAT_ID);
+        if (env.TELEGRAM_BOT_TOKEN && groupChatId) {
             // Check if bot notifications are enabled
             const notificationsSetting = await env.DB.prepare(
                 `SELECT value FROM settings WHERE key = 'bot_notifications_enabled'`
@@ -199,7 +201,7 @@ export async function runScreening(env: Env, force: boolean = false): Promise<Sc
             if (notificationsEnabled) {
                 const result = await sendTelegramMessage(
                     env.TELEGRAM_BOT_TOKEN,
-                    env.TELEGRAM_CHAT_ID,
+                    groupChatId,
                     message
                 );
                 messageSent = result.success;

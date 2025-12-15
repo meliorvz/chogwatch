@@ -37,6 +37,16 @@ async function verifyAdminSession(db: D1Database, token: string): Promise<AdminS
 }
 
 /**
+ * Helper to get the group chat ID - checks DB first, falls back to env
+ */
+export async function getGroupChatId(db: D1Database, envChatId: string): Promise<string> {
+    const setting = await db.prepare(
+        `SELECT value FROM settings WHERE key = 'telegram_chat_id'`
+    ).first<{ value: string }>();
+    return setting?.value || envChatId;
+}
+
+/**
  * Auth middleware - skips for auth endpoints
  */
 adminRoutes.use('*', async (c, next) => {
@@ -344,7 +354,8 @@ adminRoutes.put('/settings/:key', async (c) => {
         'bot_notifications_enabled',
         'msg_template_eligibility',
         'msg_template_welcome',
-        'msg_template_status'
+        'msg_template_status',
+        'telegram_chat_id'
     ];
     if (!allowedSettings.includes(key)) {
         return c.json({ error: 'Unknown setting key' }, 400);
@@ -692,7 +703,7 @@ adminRoutes.get('/kick-add-lists', async (c) => {
  * Get linked Telegram group info
  */
 adminRoutes.get('/group-info', async (c) => {
-    const chatId = c.env.TELEGRAM_CHAT_ID;
+    const chatId = await getGroupChatId(c.env.DB, c.env.TELEGRAM_CHAT_ID);
 
     if (!chatId) {
         return c.json({ error: 'No Telegram chat configured' }, 400);
@@ -787,4 +798,177 @@ adminRoutes.get('/group-members/export', async (c) => {
     `).all();
 
     return c.json({ members });
+});
+
+/**
+ * POST /api/admin/group/validate
+ * Validate that the bot can access a chat ID
+ */
+adminRoutes.post('/group/validate', async (c) => {
+    const body = await c.req.json<{ chat_id: string }>();
+
+    if (!body.chat_id) {
+        return c.json({ error: 'chat_id is required' }, 400);
+    }
+
+    // Clean up the chat ID (remove spaces, handle negative numbers for groups)
+    const chatId = body.chat_id.trim();
+
+    // Validate format (should be a number, possibly negative for groups)
+    if (!/^-?\d+$/.test(chatId)) {
+        return c.json({ error: 'Invalid chat ID format. Should be a number (negative for groups).' }, 400);
+    }
+
+    // Try to get chat info
+    const result = await getChat(c.env.TELEGRAM_BOT_TOKEN, chatId);
+
+    if (!result.success) {
+        return c.json({
+            valid: false,
+            error: result.error || 'Unable to access this chat. Make sure the bot is added to the group.'
+        });
+    }
+
+    return c.json({
+        valid: true,
+        chat_id: result.chat?.id,
+        title: result.chat?.title,
+        type: result.chat?.type
+    });
+});
+
+/**
+ * POST /api/admin/group/request-migration-otp
+ * Request OTP for group migration (reuses existing OTP infrastructure)
+ */
+adminRoutes.post('/group/request-migration-otp', async (c) => {
+    // Get current admin from session
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader?.startsWith('Bearer ')) {
+        return c.json({ error: 'Unauthorized' }, 401);
+    }
+
+    const token = authHeader.slice(7);
+    const session = await verifyAdminSession(c.env.DB, token);
+    if (!session) {
+        return c.json({ error: 'Invalid session' }, 403);
+    }
+
+    const handle = session.telegram_handle;
+
+    // Get admin info
+    const admin = await c.env.DB.prepare(
+        'SELECT * FROM admins WHERE LOWER(telegram_handle) = ?'
+    ).bind(handle).first<{ id: string; telegram_handle: string; telegram_user_id: number | null }>();
+
+    if (!admin) {
+        return c.json({ error: 'Admin not found' }, 403);
+    }
+
+    if (!admin.telegram_user_id) {
+        return c.json({
+            error: 'Please send /admin to the bot first to enable OTP delivery',
+            needs_registration: true
+        }, 400);
+    }
+
+    // Generate OTP
+    const otp = generateOTP();
+    const otpHash = await hashSecret(otp);
+    const migrationSessionId = generateId();
+    const now = Date.now();
+
+    // Store OTP session (use same admin_sessions table with a migration flag in the handle)
+    await c.env.DB.prepare(
+        `INSERT INTO admin_sessions (id, otp_hash, telegram_handle, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?)`
+    ).bind(migrationSessionId, otpHash, `migration:${handle}`, now, now + OTP_EXPIRY_MS).run();
+
+    // Send OTP via Telegram DM
+    const message = `🔐 *Group Migration OTP*\n\nYour one-time code to confirm group migration is: \`${otp}\`\n\n⚠️ This will change where all bot notifications are sent.\n\nThis code expires in 5 minutes.`;
+
+    const sendResult = await sendTelegramMessage(
+        c.env.TELEGRAM_BOT_TOKEN,
+        String(admin.telegram_user_id),
+        message
+    );
+
+    if (!sendResult.success) {
+        console.error('Failed to send migration OTP:', sendResult.error);
+        return c.json({ error: 'Failed to send OTP' }, 500);
+    }
+
+    return c.json({
+        success: true,
+        session_id: migrationSessionId
+    });
+});
+
+/**
+ * POST /api/admin/group/migrate
+ * Migrate to a new group chat (requires OTP verification)
+ */
+adminRoutes.post('/group/migrate', async (c) => {
+    const body = await c.req.json<{
+        new_chat_id: string;
+        otp: string;
+        session_id: string;
+    }>();
+
+    if (!body.new_chat_id || !body.otp || !body.session_id) {
+        return c.json({ error: 'new_chat_id, otp, and session_id are required' }, 400);
+    }
+
+    // Verify the migration OTP session
+    const session = await c.env.DB.prepare(
+        `SELECT * FROM admin_sessions 
+         WHERE id = ? AND verified_at IS NULL AND expires_at > ? AND telegram_handle LIKE 'migration:%'`
+    ).bind(body.session_id, Date.now()).first<AdminSession>();
+
+    if (!session) {
+        return c.json({ error: 'Invalid or expired migration session' }, 400);
+    }
+
+    // Verify OTP
+    const otpValid = await verifySecret(body.otp, session.otp_hash);
+    if (!otpValid) {
+        return c.json({ error: 'Invalid OTP' }, 400);
+    }
+
+    // Clean up the chat ID
+    const newChatId = body.new_chat_id.trim();
+
+    // Validate format
+    if (!/^-?\d+$/.test(newChatId)) {
+        return c.json({ error: 'Invalid chat ID format' }, 400);
+    }
+
+    // Validate that the bot can access this chat
+    const result = await getChat(c.env.TELEGRAM_BOT_TOKEN, newChatId);
+    if (!result.success) {
+        return c.json({
+            error: result.error || 'Unable to access the new chat. Make sure the bot is added to the group.'
+        }, 400);
+    }
+
+    // Save the new chat ID to settings
+    await c.env.DB.prepare(
+        'INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)'
+    ).bind('telegram_chat_id', newChatId).run();
+
+    // Mark the OTP session as verified (consumed)
+    await c.env.DB.prepare(
+        'UPDATE admin_sessions SET verified_at = ? WHERE id = ?'
+    ).bind(Date.now(), body.session_id).run();
+
+    // Send a test message to the new group
+    const welcomeMessage = `✅ *CHOG Bot Connected*\n\nThis group is now linked to the CHOG eligibility tracker. Bot notifications will be sent here.`;
+    await sendTelegramMessage(c.env.TELEGRAM_BOT_TOKEN, newChatId, welcomeMessage);
+
+    return c.json({
+        success: true,
+        chat_id: result.chat?.id,
+        title: result.chat?.title,
+        type: result.chat?.type
+    });
 });
