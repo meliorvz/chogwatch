@@ -201,11 +201,14 @@ export async function getTotalChogExposure(
 }
 
 /**
- * Format raw CHOG balance for display
+ * Format raw CHOG balance for display (in millions)
  */
 export function formatChogBalance(raw: bigint | string, decimals: number = 18): string {
     const value = typeof raw === 'string' ? BigInt(raw) : raw;
-    return formatUnits(value, decimals);
+    // Convert to millions
+    const whole = Number(value / BigInt(10 ** decimals));
+    const inMillions = whole / 1_000_000;
+    return `${inMillions.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}M`;
 }
 
 /**
