@@ -3,7 +3,7 @@ import { Hono } from 'hono';
 import type { Env } from '../index';
 import { runScreening } from '../cron/screening';
 import { generateId, generateOTP, hashSecret, verifySecret, generateSecret } from '../lib/crypto';
-import { sendTelegramMessage, getChat } from '../lib/telegram';
+import { sendTelegramMessage, getChat, kickChatMember } from '../lib/telegram';
 import { getChogTotalSupply, formatChogBalance } from '../lib/chog';
 
 export const adminRoutes = new Hono<{ Bindings: Env }>();
@@ -654,13 +654,17 @@ adminRoutes.get('/kick-add-lists', async (c) => {
     ).first<{ value: string }>();
     const threshold = BigInt(thresholdSetting?.value || '1000000000000000000000000');
 
+    const now = Date.now();
+
     // Users in group but NOT eligible (to kick)
+    // Also find when they first dropped below threshold
     const { results: toKick } = await c.env.DB.prepare(`
         SELECT 
             gm.telegram_username,
             gm.telegram_user_id,
             gm.first_name,
-            ps.total_chog_raw
+            ps.total_chog_raw,
+            first_ineligible.first_ineligible_at
         FROM group_members gm
         LEFT JOIN profiles p ON LOWER(REPLACE(p.telegram_handle, '@', '')) = LOWER(gm.telegram_username)
         LEFT JOIN profile_snapshots ps ON p.id = ps.profile_id
@@ -669,9 +673,27 @@ adminRoutes.get('/kick-add-lists', async (c) => {
             FROM profile_snapshots
             GROUP BY profile_id
         ) latest ON ps.profile_id = latest.profile_id AND ps.run_id = latest.latest_run
+        LEFT JOIN (
+            -- Find the first screening run where the user was ineligible
+            SELECT 
+                ps2.profile_id,
+                MIN(sr.started_at) as first_ineligible_at
+            FROM profile_snapshots ps2
+            INNER JOIN screening_runs sr ON ps2.run_id = sr.id
+            WHERE ps2.eligible = 0
+            GROUP BY ps2.profile_id
+        ) first_ineligible ON p.id = first_ineligible.profile_id
         WHERE gm.left_at IS NULL
         AND (p.id IS NULL OR CAST(COALESCE(ps.total_chog_raw, '0') AS INTEGER) < ?)
     `).bind(threshold.toString()).all();
+
+    // Calculate days below threshold for each user
+    const toKickWithDays = toKick.map((user: any) => ({
+        ...user,
+        days_below_threshold: user.first_ineligible_at
+            ? Math.floor((now - user.first_ineligible_at) / (24 * 60 * 60 * 1000))
+            : null
+    }));
 
     // Users eligible but NOT in group (to add)
     const { results: toAdd } = await c.env.DB.prepare(`
@@ -691,12 +713,13 @@ adminRoutes.get('/kick-add-lists', async (c) => {
     `).bind(threshold.toString()).all();
 
     return c.json({
-        to_kick: toKick,
+        to_kick: toKickWithDays,
         to_add: toAdd,
         threshold_raw: threshold.toString(),
         threshold_formatted: formatChogBalance(threshold)
     });
 });
+
 
 /**
  * GET /api/admin/group-info
@@ -970,5 +993,74 @@ adminRoutes.post('/group/migrate', async (c) => {
         chat_id: result.chat?.id,
         title: result.chat?.title,
         type: result.chat?.type
+    });
+});
+
+/**
+ * POST /api/admin/kick-users
+ * Kick selected users from the Telegram group
+ */
+adminRoutes.post('/kick-users', async (c) => {
+    const body = await c.req.json<{
+        users: Array<{ telegram_user_id: number; telegram_username?: string }>;
+    }>();
+
+    if (!body.users || !Array.isArray(body.users) || body.users.length === 0) {
+        return c.json({ error: 'users array is required and must not be empty' }, 400);
+    }
+
+    // Get the group chat ID
+    const chatId = await getGroupChatId(c.env.DB, c.env.TELEGRAM_CHAT_ID);
+
+    if (!chatId) {
+        return c.json({ error: 'No Telegram group configured' }, 400);
+    }
+
+    let kicked = 0;
+    let failed = 0;
+    const errors: string[] = [];
+    const now = Date.now();
+
+    for (const user of body.users) {
+        if (!user.telegram_user_id) {
+            failed++;
+            errors.push(`Missing telegram_user_id`);
+            continue;
+        }
+
+        try {
+            // Kick the user from the group
+            const result = await kickChatMember(
+                c.env.TELEGRAM_BOT_TOKEN,
+                chatId,
+                user.telegram_user_id
+            );
+
+            if (result.success) {
+                kicked++;
+
+                // Update group_members table to mark them as left
+                await c.env.DB.prepare(`
+                    UPDATE group_members 
+                    SET left_at = ?, updated_at = ?
+                    WHERE telegram_user_id = ?
+                `).bind(now, now, user.telegram_user_id).run();
+            } else {
+                failed++;
+                const username = user.telegram_username || user.telegram_user_id;
+                errors.push(`${username}: ${result.error}`);
+            }
+        } catch (err) {
+            failed++;
+            const username = user.telegram_username || user.telegram_user_id;
+            errors.push(`${username}: ${err instanceof Error ? err.message : 'Unknown error'}`);
+        }
+    }
+
+    return c.json({
+        success: true,
+        kicked,
+        failed,
+        errors: errors.slice(0, 10) // Limit to first 10 errors
     });
 });

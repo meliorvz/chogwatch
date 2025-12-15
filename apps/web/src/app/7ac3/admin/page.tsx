@@ -8,6 +8,14 @@ import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
 import {
+    Dialog,
+    DialogContent,
+    DialogDescription,
+    DialogFooter,
+    DialogHeader,
+    DialogTitle,
+} from '@/components/ui/dialog';
+import {
     Table,
     TableBody,
     TableCell,
@@ -93,7 +101,7 @@ interface GroupInfo {
 }
 
 interface KickAddLists {
-    to_kick: Array<{ telegram_username: string; telegram_user_id: number; total_chog_raw: string | null }>;
+    to_kick: Array<{ telegram_username: string; telegram_user_id: number; total_chog_raw: string | null; days_below_threshold: number | null }>;
     to_add: Array<{ telegram_handle: string; total_chog_raw: string }>;
     threshold_formatted: string;
 }
@@ -169,6 +177,11 @@ export default function AdminPage() {
     const [migrationSessionId, setMigrationSessionId] = React.useState<string | null>(null);
     const [migrationOtp, setMigrationOtp] = React.useState('');
     const [migrationLoading, setMigrationLoading] = React.useState(false);
+
+    // Kick users state
+    const [kickConfirmOpen, setKickConfirmOpen] = React.useState(false);
+    const [kickTarget, setKickTarget] = React.useState<'all' | { telegram_user_id: number; telegram_username?: string } | null>(null);
+    const [kickLoading, setKickLoading] = React.useState(false);
 
     // Load session from localStorage on mount
     React.useEffect(() => {
@@ -505,6 +518,31 @@ _Threshold: {{threshold}} CHOG_`;
             toast.error(err.message || 'Screening failed');
         } finally {
             setScreeningLoading(false);
+        }
+    };
+
+    const handleKickUsers = async (users: Array<{ telegram_user_id: number; telegram_username?: string }>) => {
+        setKickLoading(true);
+        try {
+            const result = await authFetch('/api/admin/kick-users', {
+                method: 'POST',
+                body: JSON.stringify({ users }),
+            });
+            if (result.kicked > 0) {
+                toast.success(`Kicked ${result.kicked} user${result.kicked > 1 ? 's' : ''}`);
+            }
+            if (result.failed > 0) {
+                toast.error(`Failed to kick ${result.failed} user${result.failed > 1 ? 's' : ''}`);
+            }
+            // Refresh the lists
+            loadKickAddLists();
+            loadGroupInfo();
+        } catch (err: any) {
+            toast.error(err.message || 'Failed to kick users');
+        } finally {
+            setKickLoading(false);
+            setKickConfirmOpen(false);
+            setKickTarget(null);
         }
     };
 
@@ -933,45 +971,152 @@ _Threshold: {{threshold}} CHOG_`;
                     </Card>
                 </div>
 
-                {/* Group Info & Whale Ownership Row */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {/* Group Info */}
+                {/* Kick/Add Lists + Whale Ownership Row */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    {/* To Add */}
                     <Card>
                         <CardHeader>
-                            <CardTitle className="flex items-center gap-2">
-                                <MessageSquare className="h-5 w-5" />
-                                Linked Telegram Group
+                            <CardTitle className="flex items-center gap-2 text-green-500">
+                                <UserCheck className="h-5 w-5" />
+                                To Add ({kickAddLists?.to_add.length || 0})
                             </CardTitle>
+                            <CardDescription>
+                                Eligible but not in group
+                            </CardDescription>
                         </CardHeader>
                         <CardContent>
-                            {groupInfo ? (
-                                <div className="space-y-2">
-                                    <div className="flex justify-between">
-                                        <span className="text-muted-foreground">Name:</span>
-                                        <span className="font-medium">{groupInfo.title || 'N/A'}</span>
-                                    </div>
-                                    <div className="flex justify-between">
-                                        <span className="text-muted-foreground">Chat ID:</span>
-                                        <code className="bg-muted px-2 py-0.5 rounded">{groupInfo.chat_id}</code>
-                                    </div>
-                                    <div className="flex justify-between">
-                                        <span className="text-muted-foreground">Tracked Members:</span>
-                                        <span>{groupInfo.tracked_member_count}</span>
-                                    </div>
-                                    <div className="flex gap-2 mt-4">
-                                        <Button variant="outline" size="sm" onClick={handleImportMembers}>
-                                            <Upload className="h-4 w-4 mr-1" /> Import
-                                        </Button>
-                                        <Button variant="outline" size="sm" onClick={handleExportMembers}>
-                                            <Download className="h-4 w-4 mr-1" /> Export
-                                        </Button>
-                                    </div>
-                                </div>
+                            {kickAddLists?.to_add.length === 0 ? (
+                                <p className="text-muted-foreground text-sm">No users to add</p>
                             ) : (
-                                <Skeleton className="h-24 w-full" />
+                                <div className="space-y-2 max-h-48 overflow-y-auto">
+                                    {kickAddLists?.to_add.map((user, i) => (
+                                        <div key={i} className="flex justify-between items-center text-sm p-2 bg-muted/50 rounded">
+                                            <span>@{user.telegram_handle.replace('@', '')}</span>
+                                            <span className="text-primary font-medium">{formatChog(user.total_chog_raw)}</span>
+                                        </div>
+                                    ))}
+                                </div>
                             )}
                         </CardContent>
                     </Card>
+
+                    {/* To Kick */}
+                    <Card>
+                        <CardHeader>
+                            <div className="flex items-center justify-between">
+                                <div>
+                                    <CardTitle className="flex items-center gap-2 text-red-500">
+                                        <UserMinus className="h-5 w-5" />
+                                        To Kick ({kickAddLists?.to_kick.length || 0})
+                                    </CardTitle>
+                                    <CardDescription>
+                                        In group but below threshold ({kickAddLists?.threshold_formatted || '1M'} CHOG)
+                                    </CardDescription>
+                                </div>
+                                {kickAddLists && kickAddLists.to_kick.length > 0 && (
+                                    <Button
+                                        variant="destructive"
+                                        size="sm"
+                                        onClick={() => {
+                                            setKickTarget('all');
+                                            setKickConfirmOpen(true);
+                                        }}
+                                        disabled={kickLoading}
+                                    >
+                                        {kickLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Kick All'}
+                                    </Button>
+                                )}
+                            </div>
+                        </CardHeader>
+                        <CardContent>
+                            {kickAddLists?.to_kick.length === 0 ? (
+                                <p className="text-muted-foreground text-sm">No users to kick</p>
+                            ) : (
+                                <div className="space-y-2 max-h-64 overflow-y-auto">
+                                    {kickAddLists?.to_kick.map((user, i) => (
+                                        <div key={i} className="flex justify-between items-center text-sm p-2 bg-muted/50 rounded gap-2">
+                                            <div className="flex-1 min-w-0">
+                                                <span className="font-medium">@{user.telegram_username || user.telegram_user_id}</span>
+                                                {user.days_below_threshold !== null && user.days_below_threshold > 0 && (
+                                                    <span className="text-red-500 text-xs ml-2">
+                                                        ({user.days_below_threshold}d below)
+                                                    </span>
+                                                )}
+                                            </div>
+                                            <span className="text-muted-foreground whitespace-nowrap">
+                                                {formatChog(user.total_chog_raw)} CHOG
+                                            </span>
+                                            <Button
+                                                variant="ghost"
+                                                size="icon"
+                                                className="h-7 w-7 text-red-500 hover:text-red-600 hover:bg-red-100 dark:hover:bg-red-900/20"
+                                                onClick={() => {
+                                                    setKickTarget({ telegram_user_id: user.telegram_user_id, telegram_username: user.telegram_username });
+                                                    setKickConfirmOpen(true);
+                                                }}
+                                                disabled={kickLoading}
+                                            >
+                                                <Trash2 className="h-4 w-4" />
+                                            </Button>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </CardContent>
+                    </Card>
+
+                    {/* Kick Confirmation Dialog */}
+                    <Dialog open={kickConfirmOpen} onOpenChange={setKickConfirmOpen}>
+                        <DialogContent>
+                            <DialogHeader>
+                                <DialogTitle className="flex items-center gap-2 text-red-500">
+                                    <AlertTriangle className="h-5 w-5" />
+                                    Confirm Kick
+                                </DialogTitle>
+                                <DialogDescription>
+                                    {kickTarget === 'all'
+                                        ? `Are you sure you want to kick ${kickAddLists?.to_kick.length || 0} users from the group? They will be removed immediately.`
+                                        : `Are you sure you want to kick @${(kickTarget as any)?.telegram_username || (kickTarget as any)?.telegram_user_id} from the group?`
+                                    }
+                                </DialogDescription>
+                            </DialogHeader>
+                            <DialogFooter>
+                                <Button
+                                    variant="outline"
+                                    onClick={() => {
+                                        setKickConfirmOpen(false);
+                                        setKickTarget(null);
+                                    }}
+                                    disabled={kickLoading}
+                                >
+                                    Cancel
+                                </Button>
+                                <Button
+                                    variant="destructive"
+                                    onClick={() => {
+                                        if (kickTarget === 'all' && kickAddLists) {
+                                            handleKickUsers(kickAddLists.to_kick.map(u => ({
+                                                telegram_user_id: u.telegram_user_id,
+                                                telegram_username: u.telegram_username
+                                            })));
+                                        } else if (kickTarget && kickTarget !== 'all') {
+                                            handleKickUsers([kickTarget as { telegram_user_id: number; telegram_username?: string }]);
+                                        }
+                                    }}
+                                    disabled={kickLoading}
+                                >
+                                    {kickLoading ? (
+                                        <>
+                                            <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                                            Kicking...
+                                        </>
+                                    ) : (
+                                        'Kick'
+                                    )}
+                                </Button>
+                            </DialogFooter>
+                        </DialogContent>
+                    </Dialog>
 
                     {/* Whale Ownership */}
                     <Card>
@@ -1026,448 +1171,6 @@ _Threshold: {{threshold}} CHOG_`;
                     </Card>
                 </div>
 
-                {/* Advanced Settings - Group Migration */}
-                <Card>
-                    <CardHeader className="cursor-pointer" onClick={() => setMigrationExpanded(!migrationExpanded)}>
-                        <CardTitle className="flex items-center justify-between">
-                            <div className="flex items-center gap-2">
-                                <AlertTriangle className="h-5 w-5 text-yellow-500" />
-                                Advanced Settings
-                            </div>
-                            {migrationExpanded ? (
-                                <ChevronUp className="h-5 w-5 text-muted-foreground" />
-                            ) : (
-                                <ChevronDown className="h-5 w-5 text-muted-foreground" />
-                            )}
-                        </CardTitle>
-                        <CardDescription>
-                            Group migration and other advanced configuration options
-                        </CardDescription>
-                    </CardHeader>
-                    {migrationExpanded && (
-                        <CardContent className="space-y-6">
-                            {/* Warning Banner */}
-                            <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-4">
-                                <div className="flex gap-3">
-                                    <AlertTriangle className="h-5 w-5 text-yellow-500 flex-shrink-0 mt-0.5" />
-                                    <div className="text-sm">
-                                        <p className="font-medium text-yellow-600 dark:text-yellow-400">
-                                            Changing the linked group will redirect all bot notifications
-                                        </p>
-                                        <p className="text-muted-foreground mt-1">
-                                            Daily eligibility updates, welcome messages, and status checks will be sent to the new group.
-                                            OTP verification is required to confirm this change.
-                                        </p>
-                                    </div>
-                                </div>
-                            </div>
-
-                            {/* Migration Walkthrough */}
-                            <div className="space-y-3">
-                                <h4 className="font-medium">📋 Migration Checklist</h4>
-                                <ol className="list-decimal list-inside space-y-2 text-sm text-muted-foreground">
-                                    <li>Create the new Telegram group (or use an existing one)</li>
-                                    <li>Add your bot to the new group</li>
-                                    <li>
-                                        Make the bot an <strong className="text-foreground">admin</strong> with these permissions:
-                                        <ul className="list-disc list-inside ml-4 mt-1">
-                                            <li>Send messages</li>
-                                            <li>Manage members (for kick/approve features)</li>
-                                        </ul>
-                                    </li>
-                                    <li>
-                                        Get the chat ID: Send any message in the group, then visit{' '}
-                                        <code className="bg-muted px-1 rounded text-xs">
-                                            https://api.telegram.org/bot&lt;TOKEN&gt;/getUpdates
-                                        </code>
-                                    </li>
-                                    <li>Enter the new chat ID below and click &quot;Validate&quot;</li>
-                                    <li>Confirm with OTP to complete migration</li>
-                                </ol>
-                            </div>
-
-                            {/* Migration Form */}
-                            <div className="border rounded-lg p-4 space-y-4">
-                                <h4 className="font-medium">Migrate to New Group</h4>
-
-                                {migrationStep === 'done' ? (
-                                    <div className="flex items-center gap-2 text-green-600">
-                                        <CheckCircle className="h-5 w-5" />
-                                        <span>Migration complete! Group updated successfully.</span>
-                                    </div>
-                                ) : (
-                                    <>
-                                        {/* Step 1: Chat ID Input */}
-                                        <div className="space-y-2">
-                                            <label className="text-sm text-muted-foreground">New Chat ID</label>
-                                            <div className="flex gap-2">
-                                                <Input
-                                                    placeholder="-1001234567890"
-                                                    value={newChatId}
-                                                    onChange={(e) => {
-                                                        setNewChatId(e.target.value);
-                                                        setValidatedGroup(null);
-                                                        setMigrationStep('input');
-                                                    }}
-                                                    disabled={migrationStep === 'otp'}
-                                                />
-                                                <Button
-                                                    onClick={handleValidateChatId}
-                                                    disabled={!newChatId.trim() || validationLoading || migrationStep === 'otp'}
-                                                    variant="secondary"
-                                                >
-                                                    {validationLoading ? (
-                                                        <Loader2 className="h-4 w-4 animate-spin" />
-                                                    ) : (
-                                                        'Validate'
-                                                    )}
-                                                </Button>
-                                            </div>
-                                            <p className="text-xs text-muted-foreground">
-                                                The chat ID is a negative number for groups (e.g., -1001234567890)
-                                            </p>
-                                        </div>
-
-                                        {/* Validation Result */}
-                                        {validatedGroup && (
-                                            <div className={`p-3 rounded-lg ${validatedGroup.valid ? 'bg-green-500/10 border border-green-500/30' : 'bg-red-500/10 border border-red-500/30'}`}>
-                                                {validatedGroup.valid ? (
-                                                    <div className="flex items-center gap-2 text-green-600 dark:text-green-400">
-                                                        <CheckCircle className="h-4 w-4" />
-                                                        <span>
-                                                            Found: <strong>{validatedGroup.title}</strong> ({validatedGroup.type})
-                                                        </span>
-                                                    </div>
-                                                ) : (
-                                                    <div className="flex items-center gap-2 text-red-600 dark:text-red-400">
-                                                        <X className="h-4 w-4" />
-                                                        <span>{validatedGroup.error}</span>
-                                                    </div>
-                                                )}
-                                            </div>
-                                        )}
-
-                                        {/* Step 2: Request OTP */}
-                                        {migrationStep === 'validated' && (
-                                            <Button
-                                                onClick={handleRequestMigrationOtp}
-                                                disabled={migrationLoading}
-                                                className="w-full"
-                                            >
-                                                {migrationLoading ? (
-                                                    <>
-                                                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                                                        Sending OTP...
-                                                    </>
-                                                ) : (
-                                                    'Request OTP to Confirm Migration'
-                                                )}
-                                            </Button>
-                                        )}
-
-                                        {/* Step 3: Enter OTP */}
-                                        {migrationStep === 'otp' && (
-                                            <div className="space-y-3">
-                                                <div className="space-y-2">
-                                                    <label className="text-sm text-muted-foreground">
-                                                        Enter the 6-digit OTP sent to your Telegram
-                                                    </label>
-                                                    <Input
-                                                        type="text"
-                                                        inputMode="numeric"
-                                                        pattern="[0-9]*"
-                                                        maxLength={6}
-                                                        placeholder="000000"
-                                                        className="text-center text-2xl tracking-widest"
-                                                        value={migrationOtp}
-                                                        onChange={(e) => setMigrationOtp(e.target.value.replace(/\D/g, ''))}
-                                                        disabled={migrationLoading}
-                                                    />
-                                                </div>
-                                                <div className="flex gap-2">
-                                                    <Button
-                                                        variant="outline"
-                                                        onClick={resetMigration}
-                                                        disabled={migrationLoading}
-                                                        className="flex-1"
-                                                    >
-                                                        Cancel
-                                                    </Button>
-                                                    <Button
-                                                        onClick={handleConfirmMigration}
-                                                        disabled={migrationOtp.length !== 6 || migrationLoading}
-                                                        className="flex-1"
-                                                    >
-                                                        {migrationLoading ? (
-                                                            <>
-                                                                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                                                                Migrating...
-                                                            </>
-                                                        ) : (
-                                                            'Confirm Migration'
-                                                        )}
-                                                    </Button>
-                                                </div>
-                                            </div>
-                                        )}
-                                    </>
-                                )}
-                            </div>
-                        </CardContent>
-                    )}
-                </Card>
-
-                {/* Settings */}
-                <Card>
-                    <CardHeader>
-                        <CardTitle className="flex items-center gap-2">
-                            <Settings className="h-5 w-5" />
-                            Settings
-                        </CardTitle>
-                    </CardHeader>
-                    <CardContent>
-                        <div className="flex flex-wrap items-end gap-6">
-                            <div className="flex-1 min-w-[200px] max-w-xs">
-                                <label className="text-sm text-muted-foreground">
-                                    Screening Interval (hours)
-                                </label>
-                                <div className="flex gap-2">
-                                    <Input
-                                        type="number"
-                                        min="1"
-                                        max="168"
-                                        value={screeningInterval}
-                                        onChange={(e) => setScreeningInterval(e.target.value)}
-                                    />
-                                    <Button onClick={handleUpdateInterval} disabled={settingsLoading}>
-                                        {settingsLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Save'}
-                                    </Button>
-                                </div>
-                            </div>
-                        </div>
-                    </CardContent>
-                </Card>
-
-                {/* Group Messages */}
-                <Card>
-                    <CardHeader>
-                        <div className="flex items-center justify-between">
-                            <CardTitle className="flex items-center gap-2">
-                                <MessageSquare className="h-5 w-5" />
-                                Group Messages
-                            </CardTitle>
-                            <div className="flex items-center gap-3">
-                                <Switch
-                                    id="bot-notifications-header"
-                                    checked={botNotificationsEnabled}
-                                    onCheckedChange={handleToggleBotNotifications}
-                                />
-                                <label htmlFor="bot-notifications-header" className="text-sm">
-                                    Notifications {botNotificationsEnabled ? 'On' : 'Off'}
-                                </label>
-                            </div>
-                        </div>
-                        <CardDescription>
-                            Preview and customize automated messages sent to the Telegram group
-                        </CardDescription>
-                    </CardHeader>
-                    <CardContent className="space-y-6">
-                        {/* Daily Eligibility Summary */}
-                        <div className="space-y-2">
-                            <div className="flex items-center justify-between">
-                                <h4 className="font-medium text-sm">Daily Eligibility Summary</h4>
-                                {templateLocks.msg_template_eligibility ? (
-                                    <Button
-                                        variant="ghost"
-                                        size="sm"
-                                        onClick={() => handleUnlockTemplate('msg_template_eligibility')}
-                                    >
-                                        <Lock className="h-4 w-4 mr-1" />
-                                        Unlock to Edit
-                                    </Button>
-                                ) : (
-                                    <div className="flex gap-2">
-                                        <Button
-                                            variant="outline"
-                                            size="sm"
-                                            onClick={() => handleLockTemplate('msg_template_eligibility')}
-                                        >
-                                            <X className="h-4 w-4 mr-1" />
-                                            Cancel
-                                        </Button>
-                                        <Button
-                                            size="sm"
-                                            onClick={() => handleSaveTemplate('msg_template_eligibility')}
-                                            disabled={templateSaving}
-                                        >
-                                            {templateSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <><Save className="h-4 w-4 mr-1" />Save</>}
-                                        </Button>
-                                    </div>
-                                )}
-                            </div>
-                            {editingTemplate === 'msg_template_eligibility' ? (
-                                <textarea
-                                    className="w-full h-64 p-3 text-sm font-mono bg-muted rounded-lg border resize-y"
-                                    value={templateDraft}
-                                    onChange={(e) => setTemplateDraft(e.target.value)}
-                                />
-                            ) : (
-                                <pre className="p-3 text-sm bg-muted rounded-lg overflow-x-auto whitespace-pre-wrap">
-                                    {templates.msg_template_eligibility || getDefaultTemplate('msg_template_eligibility')}
-                                </pre>
-                            )}
-                        </div>
-
-                        {/* Welcome Message */}
-                        <div className="space-y-2">
-                            <div className="flex items-center justify-between">
-                                <h4 className="font-medium text-sm">Welcome Message</h4>
-                                {templateLocks.msg_template_welcome ? (
-                                    <Button
-                                        variant="ghost"
-                                        size="sm"
-                                        onClick={() => handleUnlockTemplate('msg_template_welcome')}
-                                    >
-                                        <Lock className="h-4 w-4 mr-1" />
-                                        Unlock to Edit
-                                    </Button>
-                                ) : (
-                                    <div className="flex gap-2">
-                                        <Button
-                                            variant="outline"
-                                            size="sm"
-                                            onClick={() => handleLockTemplate('msg_template_welcome')}
-                                        >
-                                            <X className="h-4 w-4 mr-1" />
-                                            Cancel
-                                        </Button>
-                                        <Button
-                                            size="sm"
-                                            onClick={() => handleSaveTemplate('msg_template_welcome')}
-                                            disabled={templateSaving}
-                                        >
-                                            {templateSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <><Save className="h-4 w-4 mr-1" />Save</>}
-                                        </Button>
-                                    </div>
-                                )}
-                            </div>
-                            {editingTemplate === 'msg_template_welcome' ? (
-                                <textarea
-                                    className="w-full h-20 p-3 text-sm font-mono bg-muted rounded-lg border resize-y"
-                                    value={templateDraft}
-                                    onChange={(e) => setTemplateDraft(e.target.value)}
-                                />
-                            ) : (
-                                <pre className="p-3 text-sm bg-muted rounded-lg overflow-x-auto whitespace-pre-wrap">
-                                    {templates.msg_template_welcome || getDefaultTemplate('msg_template_welcome')}
-                                </pre>
-                            )}
-                        </div>
-
-                        {/* Status Response */}
-                        <div className="space-y-2">
-                            <div className="flex items-center justify-between">
-                                <h4 className="font-medium text-sm">Status Check Response (/status)</h4>
-                                {templateLocks.msg_template_status ? (
-                                    <Button
-                                        variant="ghost"
-                                        size="sm"
-                                        onClick={() => handleUnlockTemplate('msg_template_status')}
-                                    >
-                                        <Lock className="h-4 w-4 mr-1" />
-                                        Unlock to Edit
-                                    </Button>
-                                ) : (
-                                    <div className="flex gap-2">
-                                        <Button
-                                            variant="outline"
-                                            size="sm"
-                                            onClick={() => handleLockTemplate('msg_template_status')}
-                                        >
-                                            <X className="h-4 w-4 mr-1" />
-                                            Cancel
-                                        </Button>
-                                        <Button
-                                            size="sm"
-                                            onClick={() => handleSaveTemplate('msg_template_status')}
-                                            disabled={templateSaving}
-                                        >
-                                            {templateSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <><Save className="h-4 w-4 mr-1" />Save</>}
-                                        </Button>
-                                    </div>
-                                )}
-                            </div>
-                            {editingTemplate === 'msg_template_status' ? (
-                                <textarea
-                                    className="w-full h-32 p-3 text-sm font-mono bg-muted rounded-lg border resize-y"
-                                    value={templateDraft}
-                                    onChange={(e) => setTemplateDraft(e.target.value)}
-                                />
-                            ) : (
-                                <pre className="p-3 text-sm bg-muted rounded-lg overflow-x-auto whitespace-pre-wrap">
-                                    {templates.msg_template_status || getDefaultTemplate('msg_template_status')}
-                                </pre>
-                            )}
-                        </div>
-                    </CardContent>
-                </Card>
-
-                {/* Kick/Add Lists */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {/* To Kick */}
-                    <Card>
-                        <CardHeader>
-                            <CardTitle className="flex items-center gap-2 text-red-500">
-                                <UserMinus className="h-5 w-5" />
-                                To Kick ({kickAddLists?.to_kick.length || 0})
-                            </CardTitle>
-                            <CardDescription>
-                                In group but below threshold ({kickAddLists?.threshold_formatted || '1M'} CHOG)
-                            </CardDescription>
-                        </CardHeader>
-                        <CardContent>
-                            {kickAddLists?.to_kick.length === 0 ? (
-                                <p className="text-muted-foreground text-sm">No users to kick</p>
-                            ) : (
-                                <div className="space-y-2 max-h-48 overflow-y-auto">
-                                    {kickAddLists?.to_kick.map((user, i) => (
-                                        <div key={i} className="flex justify-between items-center text-sm p-2 bg-muted/50 rounded">
-                                            <span>@{user.telegram_username || user.telegram_user_id}</span>
-                                            <span className="text-muted-foreground">{formatChog(user.total_chog_raw)}</span>
-                                        </div>
-                                    ))}
-                                </div>
-                            )}
-                        </CardContent>
-                    </Card>
-
-                    {/* To Add */}
-                    <Card>
-                        <CardHeader>
-                            <CardTitle className="flex items-center gap-2 text-green-500">
-                                <UserCheck className="h-5 w-5" />
-                                To Add ({kickAddLists?.to_add.length || 0})
-                            </CardTitle>
-                            <CardDescription>
-                                Eligible but not in group
-                            </CardDescription>
-                        </CardHeader>
-                        <CardContent>
-                            {kickAddLists?.to_add.length === 0 ? (
-                                <p className="text-muted-foreground text-sm">No users to add</p>
-                            ) : (
-                                <div className="space-y-2 max-h-48 overflow-y-auto">
-                                    {kickAddLists?.to_add.map((user, i) => (
-                                        <div key={i} className="flex justify-between items-center text-sm p-2 bg-muted/50 rounded">
-                                            <span>@{user.telegram_handle.replace('@', '')}</span>
-                                            <span className="text-primary font-medium">{formatChog(user.total_chog_raw)}</span>
-                                        </div>
-                                    ))}
-                                </div>
-                            )}
-                        </CardContent>
-                    </Card>
-                </div>
 
                 {/* Profiles Table */}
                 <Card>
@@ -1644,70 +1347,510 @@ _Threshold: {{threshold}} CHOG_`;
                     </CardContent>
                 </Card>
 
-                {/* Admin Management */}
+                {/* Settings Panel */}
                 <Card>
                     <CardHeader>
                         <CardTitle className="flex items-center gap-2">
-                            <Shield className="h-5 w-5" />
-                            Admin Management
+                            <Settings className="h-5 w-5" />
+                            Settings
                         </CardTitle>
-                        <CardDescription>
-                            Manage who can access this dashboard
-                        </CardDescription>
                     </CardHeader>
-                    <CardContent className="space-y-4">
-                        {/* Add admin form */}
-                        <form onSubmit={handleAddAdmin} className="flex items-end gap-2">
-                            <div className="flex-1 max-w-xs">
-                                <label className="text-sm text-muted-foreground">
-                                    Add Admin
-                                </label>
-                                <div className="relative">
-                                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground/50">
-                                        @
-                                    </span>
-                                    <Input
-                                        className="pl-7"
-                                        placeholder="username"
-                                        value={newAdminHandle}
-                                        onChange={(e) => setNewAdminHandle(e.target.value)}
-                                        disabled={adminLoading}
-                                    />
+                    <CardContent className="space-y-8">
+                        {/* Screening Interval */}
+                        <div className="space-y-2">
+                            <h4 className="font-medium text-sm">Screening Interval</h4>
+                            <div className="flex flex-wrap items-end gap-6">
+                                <div className="flex-1 min-w-[200px] max-w-xs">
+                                    <label className="text-sm text-muted-foreground">
+                                        Interval (hours)
+                                    </label>
+                                    <div className="flex gap-2">
+                                        <Input
+                                            type="number"
+                                            min="1"
+                                            max="168"
+                                            value={screeningInterval}
+                                            onChange={(e) => setScreeningInterval(e.target.value)}
+                                        />
+                                        <Button onClick={handleUpdateInterval} disabled={settingsLoading}>
+                                            {settingsLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Save'}
+                                        </Button>
+                                    </div>
                                 </div>
                             </div>
-                            <Button type="submit" disabled={adminLoading || !newAdminHandle.trim()}>
-                                {adminLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <UserPlus className="h-4 w-4" />}
-                            </Button>
-                        </form>
+                        </div>
 
-                        {/* Admin list */}
-                        <div className="space-y-2">
-                            {admins.map((admin) => (
-                                <div key={admin.id} className="flex items-center justify-between p-3 rounded-lg bg-muted/50">
-                                    <div>
-                                        <span className="font-medium">@{admin.telegram_handle}</span>
-                                        <span className="text-sm text-muted-foreground ml-2">
-                                            Added {new Date(admin.added_at).toLocaleDateString()}
+                        <hr className="border-border" />
+
+                        {/* Group Messages */}
+                        <div className="space-y-4">
+                            <div className="flex items-center justify-between">
+                                <h4 className="font-medium text-sm flex items-center gap-2">
+                                    <MessageSquare className="h-4 w-4" />
+                                    Group Messages
+                                </h4>
+                                <div className="flex items-center gap-3">
+                                    <Switch
+                                        id="bot-notifications-settings"
+                                        checked={botNotificationsEnabled}
+                                        onCheckedChange={handleToggleBotNotifications}
+                                    />
+                                    <label htmlFor="bot-notifications-settings" className="text-sm">
+                                        Notifications {botNotificationsEnabled ? 'On' : 'Off'}
+                                    </label>
+                                </div>
+                            </div>
+                            <p className="text-sm text-muted-foreground">
+                                Preview and customize automated messages sent to the Telegram group
+                            </p>
+
+                            {/* Daily Eligibility Summary */}
+                            <div className="space-y-2">
+                                <div className="flex items-center justify-between">
+                                    <h5 className="font-medium text-sm">Daily Eligibility Summary</h5>
+                                    {templateLocks.msg_template_eligibility ? (
+                                        <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            onClick={() => handleUnlockTemplate('msg_template_eligibility')}
+                                        >
+                                            <Lock className="h-4 w-4 mr-1" />
+                                            Unlock to Edit
+                                        </Button>
+                                    ) : (
+                                        <div className="flex gap-2">
+                                            <Button
+                                                variant="outline"
+                                                size="sm"
+                                                onClick={() => handleLockTemplate('msg_template_eligibility')}
+                                            >
+                                                <X className="h-4 w-4 mr-1" />
+                                                Cancel
+                                            </Button>
+                                            <Button
+                                                size="sm"
+                                                onClick={() => handleSaveTemplate('msg_template_eligibility')}
+                                                disabled={templateSaving}
+                                            >
+                                                {templateSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <><Save className="h-4 w-4 mr-1" />Save</>}
+                                            </Button>
+                                        </div>
+                                    )}
+                                </div>
+                                {editingTemplate === 'msg_template_eligibility' ? (
+                                    <textarea
+                                        className="w-full h-64 p-3 text-sm font-mono bg-muted rounded-lg border resize-y"
+                                        value={templateDraft}
+                                        onChange={(e) => setTemplateDraft(e.target.value)}
+                                    />
+                                ) : (
+                                    <pre className="p-3 text-sm bg-muted rounded-lg overflow-x-auto whitespace-pre-wrap">
+                                        {templates.msg_template_eligibility || getDefaultTemplate('msg_template_eligibility')}
+                                    </pre>
+                                )}
+                            </div>
+
+                            {/* Welcome Message */}
+                            <div className="space-y-2">
+                                <div className="flex items-center justify-between">
+                                    <h5 className="font-medium text-sm">Welcome Message</h5>
+                                    {templateLocks.msg_template_welcome ? (
+                                        <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            onClick={() => handleUnlockTemplate('msg_template_welcome')}
+                                        >
+                                            <Lock className="h-4 w-4 mr-1" />
+                                            Unlock to Edit
+                                        </Button>
+                                    ) : (
+                                        <div className="flex gap-2">
+                                            <Button
+                                                variant="outline"
+                                                size="sm"
+                                                onClick={() => handleLockTemplate('msg_template_welcome')}
+                                            >
+                                                <X className="h-4 w-4 mr-1" />
+                                                Cancel
+                                            </Button>
+                                            <Button
+                                                size="sm"
+                                                onClick={() => handleSaveTemplate('msg_template_welcome')}
+                                                disabled={templateSaving}
+                                            >
+                                                {templateSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <><Save className="h-4 w-4 mr-1" />Save</>}
+                                            </Button>
+                                        </div>
+                                    )}
+                                </div>
+                                {editingTemplate === 'msg_template_welcome' ? (
+                                    <textarea
+                                        className="w-full h-20 p-3 text-sm font-mono bg-muted rounded-lg border resize-y"
+                                        value={templateDraft}
+                                        onChange={(e) => setTemplateDraft(e.target.value)}
+                                    />
+                                ) : (
+                                    <pre className="p-3 text-sm bg-muted rounded-lg overflow-x-auto whitespace-pre-wrap">
+                                        {templates.msg_template_welcome || getDefaultTemplate('msg_template_welcome')}
+                                    </pre>
+                                )}
+                            </div>
+
+                            {/* Status Response */}
+                            <div className="space-y-2">
+                                <div className="flex items-center justify-between">
+                                    <h5 className="font-medium text-sm">Status Check Response (/status)</h5>
+                                    {templateLocks.msg_template_status ? (
+                                        <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            onClick={() => handleUnlockTemplate('msg_template_status')}
+                                        >
+                                            <Lock className="h-4 w-4 mr-1" />
+                                            Unlock to Edit
+                                        </Button>
+                                    ) : (
+                                        <div className="flex gap-2">
+                                            <Button
+                                                variant="outline"
+                                                size="sm"
+                                                onClick={() => handleLockTemplate('msg_template_status')}
+                                            >
+                                                <X className="h-4 w-4 mr-1" />
+                                                Cancel
+                                            </Button>
+                                            <Button
+                                                size="sm"
+                                                onClick={() => handleSaveTemplate('msg_template_status')}
+                                                disabled={templateSaving}
+                                            >
+                                                {templateSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <><Save className="h-4 w-4 mr-1" />Save</>}
+                                            </Button>
+                                        </div>
+                                    )}
+                                </div>
+                                {editingTemplate === 'msg_template_status' ? (
+                                    <textarea
+                                        className="w-full h-32 p-3 text-sm font-mono bg-muted rounded-lg border resize-y"
+                                        value={templateDraft}
+                                        onChange={(e) => setTemplateDraft(e.target.value)}
+                                    />
+                                ) : (
+                                    <pre className="p-3 text-sm bg-muted rounded-lg overflow-x-auto whitespace-pre-wrap">
+                                        {templates.msg_template_status || getDefaultTemplate('msg_template_status')}
+                                    </pre>
+                                )}
+                            </div>
+                        </div>
+
+                        <hr className="border-border" />
+
+                        {/* Admin Management */}
+                        <div className="space-y-4">
+                            <h4 className="font-medium text-sm flex items-center gap-2">
+                                <Shield className="h-4 w-4" />
+                                Admin Management
+                            </h4>
+                            <p className="text-sm text-muted-foreground">
+                                Manage who can access this dashboard
+                            </p>
+
+                            {/* Add admin form */}
+                            <form onSubmit={handleAddAdmin} className="flex items-end gap-2">
+                                <div className="flex-1 max-w-xs">
+                                    <label className="text-sm text-muted-foreground">
+                                        Add Admin
+                                    </label>
+                                    <div className="relative">
+                                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground/50">
+                                            @
                                         </span>
-                                        {admin.last_login_at && (
+                                        <Input
+                                            className="pl-7"
+                                            placeholder="username"
+                                            value={newAdminHandle}
+                                            onChange={(e) => setNewAdminHandle(e.target.value)}
+                                            disabled={adminLoading}
+                                        />
+                                    </div>
+                                </div>
+                                <Button type="submit" disabled={adminLoading || !newAdminHandle.trim()}>
+                                    {adminLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <UserPlus className="h-4 w-4" />}
+                                </Button>
+                            </form>
+
+                            {/* Admin list */}
+                            <div className="space-y-2">
+                                {admins.map((admin) => (
+                                    <div key={admin.id} className="flex items-center justify-between p-3 rounded-lg bg-muted/50">
+                                        <div>
+                                            <span className="font-medium">@{admin.telegram_handle}</span>
                                             <span className="text-sm text-muted-foreground ml-2">
-                                                • Last login {new Date(admin.last_login_at).toLocaleDateString()}
+                                                Added {new Date(admin.added_at).toLocaleDateString()}
                                             </span>
+                                            {admin.last_login_at && (
+                                                <span className="text-sm text-muted-foreground ml-2">
+                                                    • Last login {new Date(admin.last_login_at).toLocaleDateString()}
+                                                </span>
+                                            )}
+                                        </div>
+                                        <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            onClick={() => handleRemoveAdmin(admin.id, admin.telegram_handle)}
+                                            className="text-destructive hover:text-destructive"
+                                        >
+                                            <Trash2 className="h-4 w-4" />
+                                        </Button>
+                                    </div>
+                                ))}
+                                {admins.length === 0 && (
+                                    <div className="text-center text-muted-foreground py-4">
+                                        No admins found. You'll be added automatically on first login.
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+
+                        <hr className="border-border" />
+
+                        {/* Linked Telegram Group */}
+                        <div className="space-y-4">
+                            <h4 className="font-medium text-sm flex items-center gap-2">
+                                <MessageSquare className="h-4 w-4" />
+                                Linked Telegram Group
+                            </h4>
+                            {groupInfo ? (
+                                <div className="space-y-2">
+                                    <div className="flex justify-between">
+                                        <span className="text-muted-foreground">Name:</span>
+                                        <span className="font-medium">{groupInfo.title || 'N/A'}</span>
+                                    </div>
+                                    <div className="flex justify-between">
+                                        <span className="text-muted-foreground">Chat ID:</span>
+                                        <code className="bg-muted px-2 py-0.5 rounded">{groupInfo.chat_id}</code>
+                                    </div>
+                                    <div className="flex justify-between">
+                                        <span className="text-muted-foreground">Tracked Members:</span>
+                                        <span>{groupInfo.tracked_member_count}</span>
+                                    </div>
+                                    <div className="flex gap-2 mt-4">
+                                        <Button variant="outline" size="sm" onClick={handleImportMembers}>
+                                            <Upload className="h-4 w-4 mr-1" /> Import
+                                        </Button>
+                                        <Button variant="outline" size="sm" onClick={handleExportMembers}>
+                                            <Download className="h-4 w-4 mr-1" /> Export
+                                        </Button>
+                                    </div>
+                                    {/* CSV Import Example */}
+                                    <div className="mt-4 p-3 bg-muted/50 rounded-lg text-sm">
+                                        <p className="font-medium mb-2">CSV Import Format:</p>
+                                        <code className="block bg-muted p-2 rounded text-xs overflow-x-auto">
+                                            telegram_user_id,username,first_name,joined_at,source<br />
+                                            123456789,johndoe,John,1734264882000,import
+                                        </code>
+                                        <p className="text-muted-foreground mt-2 text-xs">
+                                            <strong>joined_at:</strong> Unix timestamp in milliseconds (e.g., {Date.now()} = now).<br />
+                                            For initial migration, use current timestamp or leave blank.
+                                        </p>
+                                    </div>
+                                </div>
+                            ) : (
+                                <Skeleton className="h-24 w-full" />
+                            )}
+                        </div>
+
+                        <hr className="border-border" />
+
+                        {/* Advanced Settings */}
+                        <div className="space-y-4">
+                            <div
+                                className="flex items-center justify-between cursor-pointer"
+                                onClick={() => setMigrationExpanded(!migrationExpanded)}
+                            >
+                                <h4 className="font-medium text-sm flex items-center gap-2">
+                                    <AlertTriangle className="h-4 w-4 text-yellow-500" />
+                                    Advanced Settings
+                                </h4>
+                                {migrationExpanded ? (
+                                    <ChevronUp className="h-5 w-5 text-muted-foreground" />
+                                ) : (
+                                    <ChevronDown className="h-5 w-5 text-muted-foreground" />
+                                )}
+                            </div>
+                            <p className="text-sm text-muted-foreground">
+                                Group migration and other advanced configuration options
+                            </p>
+
+                            {migrationExpanded && (
+                                <div className="space-y-6 pt-2">
+                                    {/* Warning Banner */}
+                                    <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-4">
+                                        <div className="flex gap-3">
+                                            <AlertTriangle className="h-5 w-5 text-yellow-500 flex-shrink-0 mt-0.5" />
+                                            <div className="text-sm">
+                                                <p className="font-medium text-yellow-600 dark:text-yellow-400">
+                                                    Changing the linked group will redirect all bot notifications
+                                                </p>
+                                                <p className="text-muted-foreground mt-1">
+                                                    Daily eligibility updates, welcome messages, and status checks will be sent to the new group.
+                                                    OTP verification is required to confirm this change.
+                                                </p>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* Migration Walkthrough */}
+                                    <div className="space-y-3">
+                                        <h5 className="font-medium text-sm">📋 Migration Checklist</h5>
+                                        <ol className="list-decimal list-inside space-y-2 text-sm text-muted-foreground">
+                                            <li>Create the new Telegram group (or use an existing one)</li>
+                                            <li>Add your bot to the new group</li>
+                                            <li>
+                                                Make the bot an <strong className="text-foreground">admin</strong> with these permissions:
+                                                <ul className="list-disc list-inside ml-4 mt-1">
+                                                    <li>Send messages</li>
+                                                    <li>Manage members (for kick/approve features)</li>
+                                                </ul>
+                                            </li>
+                                            <li>
+                                                Get the chat ID: Send any message in the group, then visit{' '}
+                                                <code className="bg-muted px-1 rounded text-xs">
+                                                    https://api.telegram.org/bot&lt;TOKEN&gt;/getUpdates
+                                                </code>
+                                            </li>
+                                            <li>Enter the new chat ID below and click &quot;Validate&quot;</li>
+                                            <li>Confirm with OTP to complete migration</li>
+                                        </ol>
+                                    </div>
+
+                                    {/* Migration Form */}
+                                    <div className="border rounded-lg p-4 space-y-4">
+                                        <h5 className="font-medium text-sm">Migrate to New Group</h5>
+
+                                        {migrationStep === 'done' ? (
+                                            <div className="flex items-center gap-2 text-green-600">
+                                                <CheckCircle className="h-5 w-5" />
+                                                <span>Migration complete! Group updated successfully.</span>
+                                            </div>
+                                        ) : (
+                                            <>
+                                                {/* Step 1: Chat ID Input */}
+                                                <div className="space-y-2">
+                                                    <label className="text-sm text-muted-foreground">New Chat ID</label>
+                                                    <div className="flex gap-2">
+                                                        <Input
+                                                            placeholder="-1001234567890"
+                                                            value={newChatId}
+                                                            onChange={(e) => {
+                                                                setNewChatId(e.target.value);
+                                                                setValidatedGroup(null);
+                                                                setMigrationStep('input');
+                                                            }}
+                                                            disabled={migrationStep === 'otp'}
+                                                        />
+                                                        <Button
+                                                            onClick={handleValidateChatId}
+                                                            disabled={!newChatId.trim() || validationLoading || migrationStep === 'otp'}
+                                                            variant="secondary"
+                                                        >
+                                                            {validationLoading ? (
+                                                                <Loader2 className="h-4 w-4 animate-spin" />
+                                                            ) : (
+                                                                'Validate'
+                                                            )}
+                                                        </Button>
+                                                    </div>
+                                                    <p className="text-xs text-muted-foreground">
+                                                        The chat ID is a negative number for groups (e.g., -1001234567890)
+                                                    </p>
+                                                </div>
+
+                                                {/* Validation Result */}
+                                                {validatedGroup && (
+                                                    <div className={`p-3 rounded-lg ${validatedGroup.valid ? 'bg-green-500/10 border border-green-500/30' : 'bg-red-500/10 border border-red-500/30'}`}>
+                                                        {validatedGroup.valid ? (
+                                                            <div className="flex items-center gap-2 text-green-600 dark:text-green-400">
+                                                                <CheckCircle className="h-4 w-4" />
+                                                                <span>
+                                                                    Found: <strong>{validatedGroup.title}</strong> ({validatedGroup.type})
+                                                                </span>
+                                                            </div>
+                                                        ) : (
+                                                            <div className="flex items-center gap-2 text-red-600 dark:text-red-400">
+                                                                <X className="h-4 w-4" />
+                                                                <span>{validatedGroup.error}</span>
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                )}
+
+                                                {/* Step 2: Request OTP */}
+                                                {migrationStep === 'validated' && (
+                                                    <Button
+                                                        onClick={handleRequestMigrationOtp}
+                                                        disabled={migrationLoading}
+                                                        className="w-full"
+                                                    >
+                                                        {migrationLoading ? (
+                                                            <>
+                                                                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                                                                Sending OTP...
+                                                            </>
+                                                        ) : (
+                                                            'Request OTP to Confirm Migration'
+                                                        )}
+                                                    </Button>
+                                                )}
+
+                                                {/* Step 3: Enter OTP */}
+                                                {migrationStep === 'otp' && (
+                                                    <div className="space-y-3">
+                                                        <div className="space-y-2">
+                                                            <label className="text-sm text-muted-foreground">
+                                                                Enter the 6-digit OTP sent to your Telegram
+                                                            </label>
+                                                            <Input
+                                                                type="text"
+                                                                inputMode="numeric"
+                                                                pattern="[0-9]*"
+                                                                maxLength={6}
+                                                                placeholder="000000"
+                                                                className="text-center text-2xl tracking-widest"
+                                                                value={migrationOtp}
+                                                                onChange={(e) => setMigrationOtp(e.target.value.replace(/\D/g, ''))}
+                                                                disabled={migrationLoading}
+                                                            />
+                                                        </div>
+                                                        <div className="flex gap-2">
+                                                            <Button
+                                                                variant="outline"
+                                                                onClick={resetMigration}
+                                                                disabled={migrationLoading}
+                                                                className="flex-1"
+                                                            >
+                                                                Cancel
+                                                            </Button>
+                                                            <Button
+                                                                onClick={handleConfirmMigration}
+                                                                disabled={migrationOtp.length !== 6 || migrationLoading}
+                                                                className="flex-1"
+                                                            >
+                                                                {migrationLoading ? (
+                                                                    <>
+                                                                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                                                                        Migrating...
+                                                                    </>
+                                                                ) : (
+                                                                    'Confirm Migration'
+                                                                )}
+                                                            </Button>
+                                                        </div>
+                                                    </div>
+                                                )}
+                                            </>
                                         )}
                                     </div>
-                                    <Button
-                                        variant="ghost"
-                                        size="sm"
-                                        onClick={() => handleRemoveAdmin(admin.id, admin.telegram_handle)}
-                                        className="text-destructive hover:text-destructive"
-                                    >
-                                        <Trash2 className="h-4 w-4" />
-                                    </Button>
-                                </div>
-                            ))}
-                            {admins.length === 0 && (
-                                <div className="text-center text-muted-foreground py-4">
-                                    No admins found. You'll be added automatically on first login.
                                 </div>
                             )}
                         </div>
