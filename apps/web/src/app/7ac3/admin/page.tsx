@@ -38,6 +38,10 @@ import {
     UserMinus,
     UserCheck,
     MessageSquare,
+    Lock,
+    Unlock,
+    Save,
+    X,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -137,6 +141,17 @@ export default function AdminPage() {
     const [whaleOwnership, setWhaleOwnership] = React.useState<WhaleOwnership | null>(null);
     const [groupInfo, setGroupInfo] = React.useState<GroupInfo | null>(null);
     const [kickAddLists, setKickAddLists] = React.useState<KickAddLists | null>(null);
+
+    // Message templates state
+    const [templates, setTemplates] = React.useState<Record<string, string>>({});
+    const [templateLocks, setTemplateLocks] = React.useState<Record<string, boolean>>({
+        msg_template_eligibility: true,
+        msg_template_welcome: true,
+        msg_template_status: true,
+    });
+    const [editingTemplate, setEditingTemplate] = React.useState<string | null>(null);
+    const [templateDraft, setTemplateDraft] = React.useState('');
+    const [templateSaving, setTemplateSaving] = React.useState(false);
 
     // Admin management state
     const [admins, setAdmins] = React.useState<Admin[]>([]);
@@ -276,12 +291,99 @@ export default function AdminPage() {
             setLastUpdated(profilesData.last_updated);
             setScreeningInterval(statsData.settings.screening_interval_hours || '24');
             setBotNotificationsEnabled(statsData.settings.bot_notifications_enabled !== 'false');
+
+            // Extract message templates from settings
+            const loadedTemplates: Record<string, string> = {};
+            if (statsData.settings.msg_template_eligibility) {
+                loadedTemplates.msg_template_eligibility = statsData.settings.msg_template_eligibility;
+            }
+            if (statsData.settings.msg_template_welcome) {
+                loadedTemplates.msg_template_welcome = statsData.settings.msg_template_welcome;
+            }
+            if (statsData.settings.msg_template_status) {
+                loadedTemplates.msg_template_status = statsData.settings.msg_template_status;
+            }
+            setTemplates(loadedTemplates);
         } catch (err: any) {
             toast.error(err.message || 'Failed to load data');
         } finally {
             setLoading(false);
         }
     };
+
+    const handleSaveTemplate = async (key: string) => {
+        setTemplateSaving(true);
+        try {
+            await authFetch(`/api/admin/settings/${key}`, {
+                method: 'PUT',
+                body: JSON.stringify({ value: templateDraft }),
+            });
+            setTemplates(prev => ({ ...prev, [key]: templateDraft }));
+            setTemplateLocks(prev => ({ ...prev, [key]: true }));
+            setEditingTemplate(null);
+            toast.success('Template saved');
+        } catch (err: any) {
+            toast.error(err.message || 'Failed to save template');
+        } finally {
+            setTemplateSaving(false);
+        }
+    };
+
+    const handleUnlockTemplate = (key: string) => {
+        setTemplateLocks(prev => ({ ...prev, [key]: false }));
+        setEditingTemplate(key);
+        setTemplateDraft(templates[key] || getDefaultTemplate(key));
+    };
+
+    const handleLockTemplate = (key: string) => {
+        setTemplateLocks(prev => ({ ...prev, [key]: true }));
+        setEditingTemplate(null);
+    };
+
+    const getDefaultTemplate = (key: string): string => {
+        switch (key) {
+            case 'msg_template_eligibility':
+                return `🐸 *CHOG Eligibility — {{date}}*
+
+📊 *Summary*
+• Eligible: {{eligibleCount}}
+• New: {{newCount}}
+• Dropped: {{droppedCount}}
+
+{{#if newlyEligible}}
+✅ *Newly Eligible*
+{{#each newlyEligible}}
+• @{{handle}} — {{totalChog}} CHOG
+{{/each}}
+{{/if}}
+
+{{#if droppedEligible}}
+❌ *No Longer Eligible*
+{{#each droppedEligible}}
+• @{{handle}}
+{{/each}}
+{{/if}}
+
+{{#if topEligible}}
+🏆 *Top 10 Holders*
+{{#each topEligible}}
+{{medal}} @{{handle}} — {{totalChog}} CHOG
+{{/each}}
+{{/if}}`;
+            case 'msg_template_welcome':
+                return '🐸 Welcome @{{username}}! Your CHOG eligibility has been verified.';
+            case 'msg_template_status':
+                return `🐸 *CHOG Status for @{{username}}*
+
+💰 Total CHOG: {{totalChog}}
+{{statusEmoji}} Status: {{statusText}}
+
+_Threshold: {{threshold}} CHOG_`;
+            default:
+                return '';
+        }
+    };
+
 
     const loadAdmins = async () => {
         try {
@@ -425,14 +527,28 @@ export default function AdminPage() {
     const handleExportMembers = async () => {
         try {
             const data = await authFetch('/api/admin/group-members/export');
-            const blob = new Blob([JSON.stringify(data.members, null, 2)], { type: 'application/json' });
+            // Create CSV content
+            const headers = ['telegram_user_id', 'username', 'first_name', 'joined_at', 'source'];
+            const csvRows = [headers.join(',')];
+            for (const member of data.members) {
+                const row = [
+                    member.telegram_user_id,
+                    member.telegram_username || '',
+                    (member.first_name || '').replace(/,/g, ' '), // Escape commas in names
+                    member.joined_at || '',
+                    member.source || ''
+                ];
+                csvRows.push(row.join(','));
+            }
+            const csvContent = csvRows.join('\n');
+            const blob = new Blob([csvContent], { type: 'text/csv' });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = 'group_members.json';
+            a.download = 'group_members.csv';
             a.click();
             URL.revokeObjectURL(url);
-            toast.success('Members exported');
+            toast.success('Members exported as CSV');
         } catch (err: any) {
             toast.error('Failed to export members');
         }
@@ -441,14 +557,48 @@ export default function AdminPage() {
     const handleImportMembers = async () => {
         const input = document.createElement('input');
         input.type = 'file';
-        input.accept = '.json';
+        input.accept = '.csv';
         input.onchange = async (e) => {
             const file = (e.target as HTMLInputElement).files?.[0];
             if (!file) return;
 
             try {
                 const text = await file.text();
-                const members = JSON.parse(text);
+                const lines = text.trim().split('\n');
+                if (lines.length < 2) {
+                    toast.error('CSV file is empty or has no data rows');
+                    return;
+                }
+
+                // Parse header to find column indices
+                const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
+                const userIdIdx = headers.findIndex(h => h === 'telegram_user_id' || h === 'user_id' || h === 'id');
+                const usernameIdx = headers.findIndex(h => h === 'username' || h === 'telegram_username');
+                const firstNameIdx = headers.findIndex(h => h === 'first_name' || h === 'firstname' || h === 'name');
+
+                if (userIdIdx === -1) {
+                    toast.error('CSV must have a telegram_user_id column');
+                    return;
+                }
+
+                const members = [];
+                for (let i = 1; i < lines.length; i++) {
+                    const cols = lines[i].split(',');
+                    const userId = parseInt(cols[userIdIdx], 10);
+                    if (isNaN(userId)) continue;
+
+                    members.push({
+                        telegram_user_id: userId,
+                        username: usernameIdx >= 0 ? cols[usernameIdx]?.trim() : undefined,
+                        first_name: firstNameIdx >= 0 ? cols[firstNameIdx]?.trim() : undefined
+                    });
+                }
+
+                if (members.length === 0) {
+                    toast.error('No valid members found in CSV');
+                    return;
+                }
+
                 const result = await authFetch('/api/admin/group-members/import', {
                     method: 'POST',
                     body: JSON.stringify({ members }),
@@ -458,7 +608,7 @@ export default function AdminPage() {
                 loadKickAddLists();
                 loadDashboardData();
             } catch (err: any) {
-                toast.error('Failed to import members');
+                toast.error('Failed to import members: ' + (err.message || 'Unknown error'));
             }
         };
         input.click();
@@ -466,12 +616,25 @@ export default function AdminPage() {
 
     const formatAddress = (address: string) => `${address.slice(0, 6)}...${address.slice(-4)}`;
 
+    // For table rows: #,##0 format (whole numbers with thousand separators)
     const formatChog = (raw: string | null): string => {
         if (!raw) return '—';
         try {
             const value = BigInt(raw);
-            const whole = value / BigInt(10 ** 18);
+            const whole = Number(value / BigInt(10 ** 18));
             return whole.toLocaleString();
+        } catch {
+            return '—';
+        }
+    };
+
+    // For summary stats: X.XM format
+    const formatChogMillions = (raw: string | null): string => {
+        if (!raw) return '—';
+        try {
+            const value = BigInt(raw);
+            const inMillions = Number(value / BigInt(10 ** 18)) / 1_000_000;
+            return `${inMillions.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })}M CHOG`;
         } catch {
             return '—';
         }
@@ -482,14 +645,15 @@ export default function AdminPage() {
         return new Date(ts).toLocaleString();
     };
 
+    // For 7d change: whole numbers with +/- prefix
     const formatChange = (change: string | null): React.ReactNode => {
         if (!change) return <span className="text-muted-foreground">—</span>;
         try {
             const value = BigInt(change);
-            const whole = value / BigInt(10 ** 18);
-            const num = Number(whole);
-            if (num > 0) return <span className="text-green-500">+{num.toLocaleString()}</span>;
-            if (num < 0) return <span className="text-red-500">{num.toLocaleString()}</span>;
+            const whole = Number(value / BigInt(10 ** 18));
+            const formatted = Math.abs(whole).toLocaleString();
+            if (whole > 0) return <span className="text-green-500">+{formatted}</span>;
+            if (whole < 0) return <span className="text-red-500">-{formatted}</span>;
             return <span className="text-muted-foreground">0</span>;
         } catch {
             return '—';
@@ -787,16 +951,170 @@ export default function AdminPage() {
                                     </Button>
                                 </div>
                             </div>
+                        </div>
+                    </CardContent>
+                </Card>
+
+                {/* Group Messages */}
+                <Card>
+                    <CardHeader>
+                        <div className="flex items-center justify-between">
+                            <CardTitle className="flex items-center gap-2">
+                                <MessageSquare className="h-5 w-5" />
+                                Group Messages
+                            </CardTitle>
                             <div className="flex items-center gap-3">
                                 <Switch
-                                    id="bot-notifications"
+                                    id="bot-notifications-header"
                                     checked={botNotificationsEnabled}
                                     onCheckedChange={handleToggleBotNotifications}
                                 />
-                                <label htmlFor="bot-notifications" className="text-sm">
-                                    Group Notifications
+                                <label htmlFor="bot-notifications-header" className="text-sm">
+                                    Notifications {botNotificationsEnabled ? 'On' : 'Off'}
                                 </label>
                             </div>
+                        </div>
+                        <CardDescription>
+                            Preview and customize automated messages sent to the Telegram group
+                        </CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-6">
+                        {/* Daily Eligibility Summary */}
+                        <div className="space-y-2">
+                            <div className="flex items-center justify-between">
+                                <h4 className="font-medium text-sm">Daily Eligibility Summary</h4>
+                                {templateLocks.msg_template_eligibility ? (
+                                    <Button
+                                        variant="ghost"
+                                        size="sm"
+                                        onClick={() => handleUnlockTemplate('msg_template_eligibility')}
+                                    >
+                                        <Lock className="h-4 w-4 mr-1" />
+                                        Unlock to Edit
+                                    </Button>
+                                ) : (
+                                    <div className="flex gap-2">
+                                        <Button
+                                            variant="outline"
+                                            size="sm"
+                                            onClick={() => handleLockTemplate('msg_template_eligibility')}
+                                        >
+                                            <X className="h-4 w-4 mr-1" />
+                                            Cancel
+                                        </Button>
+                                        <Button
+                                            size="sm"
+                                            onClick={() => handleSaveTemplate('msg_template_eligibility')}
+                                            disabled={templateSaving}
+                                        >
+                                            {templateSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <><Save className="h-4 w-4 mr-1" />Save</>}
+                                        </Button>
+                                    </div>
+                                )}
+                            </div>
+                            {editingTemplate === 'msg_template_eligibility' ? (
+                                <textarea
+                                    className="w-full h-64 p-3 text-sm font-mono bg-muted rounded-lg border resize-y"
+                                    value={templateDraft}
+                                    onChange={(e) => setTemplateDraft(e.target.value)}
+                                />
+                            ) : (
+                                <pre className="p-3 text-sm bg-muted rounded-lg overflow-x-auto whitespace-pre-wrap">
+                                    {templates.msg_template_eligibility || getDefaultTemplate('msg_template_eligibility')}
+                                </pre>
+                            )}
+                        </div>
+
+                        {/* Welcome Message */}
+                        <div className="space-y-2">
+                            <div className="flex items-center justify-between">
+                                <h4 className="font-medium text-sm">Welcome Message</h4>
+                                {templateLocks.msg_template_welcome ? (
+                                    <Button
+                                        variant="ghost"
+                                        size="sm"
+                                        onClick={() => handleUnlockTemplate('msg_template_welcome')}
+                                    >
+                                        <Lock className="h-4 w-4 mr-1" />
+                                        Unlock to Edit
+                                    </Button>
+                                ) : (
+                                    <div className="flex gap-2">
+                                        <Button
+                                            variant="outline"
+                                            size="sm"
+                                            onClick={() => handleLockTemplate('msg_template_welcome')}
+                                        >
+                                            <X className="h-4 w-4 mr-1" />
+                                            Cancel
+                                        </Button>
+                                        <Button
+                                            size="sm"
+                                            onClick={() => handleSaveTemplate('msg_template_welcome')}
+                                            disabled={templateSaving}
+                                        >
+                                            {templateSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <><Save className="h-4 w-4 mr-1" />Save</>}
+                                        </Button>
+                                    </div>
+                                )}
+                            </div>
+                            {editingTemplate === 'msg_template_welcome' ? (
+                                <textarea
+                                    className="w-full h-20 p-3 text-sm font-mono bg-muted rounded-lg border resize-y"
+                                    value={templateDraft}
+                                    onChange={(e) => setTemplateDraft(e.target.value)}
+                                />
+                            ) : (
+                                <pre className="p-3 text-sm bg-muted rounded-lg overflow-x-auto whitespace-pre-wrap">
+                                    {templates.msg_template_welcome || getDefaultTemplate('msg_template_welcome')}
+                                </pre>
+                            )}
+                        </div>
+
+                        {/* Status Response */}
+                        <div className="space-y-2">
+                            <div className="flex items-center justify-between">
+                                <h4 className="font-medium text-sm">Status Check Response (/status)</h4>
+                                {templateLocks.msg_template_status ? (
+                                    <Button
+                                        variant="ghost"
+                                        size="sm"
+                                        onClick={() => handleUnlockTemplate('msg_template_status')}
+                                    >
+                                        <Lock className="h-4 w-4 mr-1" />
+                                        Unlock to Edit
+                                    </Button>
+                                ) : (
+                                    <div className="flex gap-2">
+                                        <Button
+                                            variant="outline"
+                                            size="sm"
+                                            onClick={() => handleLockTemplate('msg_template_status')}
+                                        >
+                                            <X className="h-4 w-4 mr-1" />
+                                            Cancel
+                                        </Button>
+                                        <Button
+                                            size="sm"
+                                            onClick={() => handleSaveTemplate('msg_template_status')}
+                                            disabled={templateSaving}
+                                        >
+                                            {templateSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <><Save className="h-4 w-4 mr-1" />Save</>}
+                                        </Button>
+                                    </div>
+                                )}
+                            </div>
+                            {editingTemplate === 'msg_template_status' ? (
+                                <textarea
+                                    className="w-full h-32 p-3 text-sm font-mono bg-muted rounded-lg border resize-y"
+                                    value={templateDraft}
+                                    onChange={(e) => setTemplateDraft(e.target.value)}
+                                />
+                            ) : (
+                                <pre className="p-3 text-sm bg-muted rounded-lg overflow-x-auto whitespace-pre-wrap">
+                                    {templates.msg_template_status || getDefaultTemplate('msg_template_status')}
+                                </pre>
+                            )}
                         </div>
                     </CardContent>
                 </Card>

@@ -337,7 +337,15 @@ adminRoutes.put('/settings/:key', async (c) => {
     }
 
     // Validate known settings
-    const allowedSettings = ['screening_interval_hours', 'eligibility_threshold_raw', 'chog_decimals', 'bot_notifications_enabled'];
+    const allowedSettings = [
+        'screening_interval_hours',
+        'eligibility_threshold_raw',
+        'chog_decimals',
+        'bot_notifications_enabled',
+        'msg_template_eligibility',
+        'msg_template_welcome',
+        'msg_template_status'
+    ];
     if (!allowedSettings.includes(key)) {
         return c.json({ error: 'Unknown setting key' }, 400);
     }
@@ -580,16 +588,28 @@ adminRoutes.get('/profiles/:id/wallets', async (c) => {
  * Get whale ownership as percentage of total supply
  */
 adminRoutes.get('/whale-ownership', async (c) => {
-    // Get total CHOG held by all profiles (whales)
-    const totalHeld = await c.env.DB.prepare(`
-        SELECT COALESCE(SUM(CAST(ps.total_chog_raw AS INTEGER)), 0) as total
+    // Get total CHOG held by all profiles (whales) - fetch as strings to avoid overflow
+    const { results: snapshots } = await c.env.DB.prepare(`
+        SELECT ps.total_chog_raw
         FROM profile_snapshots ps
         INNER JOIN (
             SELECT profile_id, MAX(run_id) as latest_run
             FROM profile_snapshots
             GROUP BY profile_id
         ) latest ON ps.profile_id = latest.profile_id AND ps.run_id = latest.latest_run
-    `).first<{ total: number }>();
+    `).all<{ total_chog_raw: string }>();
+
+    // Sum using BigInt to avoid overflow
+    let whaleTotal = 0n;
+    for (const s of snapshots) {
+        if (s.total_chog_raw) {
+            try {
+                whaleTotal += BigInt(s.total_chog_raw);
+            } catch {
+                // Skip invalid values
+            }
+        }
+    }
 
     // Get total CHOG supply from contract
     let totalSupply = 0n;
@@ -599,7 +619,6 @@ adminRoutes.get('/whale-ownership', async (c) => {
         console.error('Failed to fetch total supply:', err);
     }
 
-    const whaleTotal = BigInt(totalHeld?.total || 0);
     const percentage = totalSupply > 0n
         ? Number((whaleTotal * 10000n) / totalSupply) / 100
         : 0;
