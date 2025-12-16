@@ -222,7 +222,7 @@ export default function HomePage() {
                                     </span>
                                     <Input
                                         className="pl-7"
-                                        placeholder="username"
+                                        placeholder="telegramhandle"
                                         value={handle}
                                         onChange={handleHandleChange}
                                         disabled={submitting}
