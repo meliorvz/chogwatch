@@ -207,7 +207,7 @@ export default function HomePage() {
                         <CardTitle className="text-2xl">Chog Whale Order</CardTitle>
                         <CardDescription>
                             {whaleStats ? (
-                                <>The whales currently control {whaleStats.whale_total_millions}M CHOG ({whaleStats.percentage}% supply). Link your wallets to join the order.</>
+                                <>The whales currently control <span className="text-green-500 font-semibold">{whaleStats.whale_total_millions}M CHOG</span> ({whaleStats.percentage}% supply).<br />Link your wallets to join the order.</>
                             ) : (
                                 <>Link your wallets to join the whale order.</>
                             )}
