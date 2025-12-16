@@ -46,8 +46,9 @@ export function EligibilityCard({ snapshot, wallets }: EligibilityCardProps) {
         return total.toString();
     };
 
-    // Use snapshot if available, otherwise calculate from wallet balances
-    const totalChogRaw = snapshot?.total_chog_raw || calculateTotalFromWallets();
+    // Always calculate total from current wallet balances (real-time)
+    // The snapshot is only used to show when the last screening was done
+    const totalChogRaw = calculateTotalFromWallets();
     const { whole, formatted } = formatChog(totalChogRaw);
     const totalChog = parseInt(whole, 10);
 

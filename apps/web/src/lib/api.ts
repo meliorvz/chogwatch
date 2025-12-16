@@ -153,6 +153,10 @@ class ApiClient {
     async lookupWallet(address: string): Promise<WalletLookup> {
         return this.fetch<WalletLookup>(`/api/wallets/lookup/${address}`);
     }
+
+    async getWhaleStats(): Promise<{ whale_total_millions: string; percentage: string }> {
+        return this.fetch(`/api/profile/stats/whale-order`);
+    }
 }
 
 export const api = new ApiClient();

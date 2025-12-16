@@ -11,8 +11,58 @@ import {
     getLatestSnapshotForProfile
 } from '../lib/db';
 import { generateId, generateSecret, hashSecret, verifySecret } from '../lib/crypto';
+import { getChogTotalSupply, formatChogBalance } from '../lib/chog';
 
 export const profileRoutes = new Hono<{ Bindings: Env }>();
+
+/**
+ * GET /api/profile/stats/whale-order
+ * Public endpoint for whale order statistics (used on homepage)
+ */
+profileRoutes.get('/stats/whale-order', async (c) => {
+    // Get total CHOG held by all profiles (whales) - fetch as strings to avoid overflow
+    const { results: snapshots } = await c.env.DB.prepare(`
+        SELECT ps.total_chog_raw
+        FROM profile_snapshots ps
+        INNER JOIN (
+            SELECT profile_id, MAX(run_id) as latest_run
+            FROM profile_snapshots
+            GROUP BY profile_id
+        ) latest ON ps.profile_id = latest.profile_id AND ps.run_id = latest.latest_run
+    `).all<{ total_chog_raw: string }>();
+
+    // Sum using BigInt to avoid overflow
+    let whaleTotal = 0n;
+    for (const s of snapshots) {
+        if (s.total_chog_raw) {
+            try {
+                whaleTotal += BigInt(s.total_chog_raw);
+            } catch {
+                // Skip invalid values
+            }
+        }
+    }
+
+    // Get total CHOG supply from contract
+    let totalSupply = 0n;
+    try {
+        totalSupply = await getChogTotalSupply(c.env.MONAD_RPC_URL, c.env.CHOG_CONTRACT);
+    } catch (err) {
+        console.error('Failed to fetch total supply:', err);
+    }
+
+    const percentage = totalSupply > 0n
+        ? Number((whaleTotal * 10000n) / totalSupply) / 100
+        : 0;
+
+    // Format whale total in millions (divide by 10^18 for decimals, then by 10^6 for millions)
+    const whaleTotalMillions = Number(whaleTotal / 10n ** 18n) / 1_000_000;
+
+    return c.json({
+        whale_total_millions: whaleTotalMillions.toFixed(1),
+        percentage: percentage.toFixed(1)
+    });
+});
 
 /**
  * POST /api/profile/upsert

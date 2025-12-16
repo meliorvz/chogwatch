@@ -17,6 +17,11 @@ import { initEIP6963Discovery, subscribeToProviders, EIP6963ProviderDetail } fro
 import { Plus, LogOut, Wallet, AlertCircle, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 
+interface WhaleStats {
+    whale_total_millions: string;
+    percentage: string;
+}
+
 export default function HomePage() {
     const [handle, setHandle] = React.useState('');
     const [handleError, setHandleError] = React.useState<string | null>(null);
@@ -27,6 +32,7 @@ export default function HomePage() {
     const [walletPickerOpen, setWalletPickerOpen] = React.useState(false);
     const [recoveryPickerOpen, setRecoveryPickerOpen] = React.useState(false);
     const [providers, setProviders] = React.useState<EIP6963ProviderDetail[]>([]);
+    const [whaleStats, setWhaleStats] = React.useState<WhaleStats | null>(null);
 
     // Telegram username validation rules:
     // - 5-32 characters
@@ -45,6 +51,13 @@ export default function HomePage() {
         setHandle(value);
         setHandleError(validateHandle(value));
     };
+
+    // Fetch whale stats for landing page
+    React.useEffect(() => {
+        api.getWhaleStats()
+            .then(setWhaleStats)
+            .catch((err) => console.error('Failed to load whale stats:', err));
+    }, []);
 
     // Initialize and load stored profile
     React.useEffect(() => {
@@ -191,9 +204,13 @@ export default function HomePage() {
                         <div className="mx-auto mb-4">
                             <Image src="/choglogo.svg" alt="CHOG" width={80} height={80} className="mx-auto" />
                         </div>
-                        <CardTitle className="text-2xl">CHOG Eligibility</CardTitle>
+                        <CardTitle className="text-2xl">Chog Whale Order</CardTitle>
                         <CardDescription>
-                            Link wallets to a Telegram handle. We&apos;ll check daily for eligibility.
+                            {whaleStats ? (
+                                <>The whales currently control {whaleStats.whale_total_millions}M CHOG ({whaleStats.percentage}% supply). Link your wallets to join the order.</>
+                            ) : (
+                                <>Link your wallets to join the whale order.</>
+                            )}
                         </CardDescription>
                     </CardHeader>
                     <CardContent>
